@@ -1,0 +1,9 @@
+D:\CongNgheDotnet\FaceIDApp\bin\Debug\FaceIDApp.exe.config
+D:\CongNgheDotnet\FaceIDApp\bin\Debug\FaceIDApp.exe
+D:\CongNgheDotnet\FaceIDApp\bin\Debug\FaceIDApp.pdb
+D:\CongNgheDotnet\FaceIDApp\obj\Debug\FaceIDApp.csproj.AssemblyReference.cache
+D:\CongNgheDotnet\FaceIDApp\obj\Debug\FaceIDApp.Properties.Resources.resources
+D:\CongNgheDotnet\FaceIDApp\obj\Debug\FaceIDApp.csproj.GenerateResource.cache
+D:\CongNgheDotnet\FaceIDApp\obj\Debug\FaceIDApp.csproj.CoreCompileInputs.cache
+D:\CongNgheDotnet\FaceIDApp\obj\Debug\FaceIDApp.exe
+D:\CongNgheDotnet\FaceIDApp\obj\Debug\FaceIDApp.pdb
