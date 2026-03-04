@@ -445,3 +445,364 @@ CREATE TABLE audit_logs (
     user_agent  TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ================================================================
+-- PHẦN 4: TẠO INDEXES
+-- ================================================================
+
+-- [A] Tổ chức
+CREATE INDEX idx_org_type      ON organizations(org_type);
+CREATE INDEX idx_unit_org      ON units(org_id);
+CREATE INDEX idx_unit_parent   ON units(parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX idx_unit_active   ON units(org_id, is_active) WHERE is_active = TRUE;
+CREATE INDEX idx_role_org      ON roles(org_id);
+CREATE INDEX idx_sched_org     ON schedules(org_id);
+CREATE INDEX idx_sched_type    ON schedules(org_id, schedule_type);
+
+-- [B] Thành viên
+CREATE INDEX idx_member_org    ON members(org_id);
+CREATE INDEX idx_member_active ON members(org_id, is_active) WHERE is_active = TRUE;
+CREATE INDEX idx_member_name   ON members(org_id, full_name);
+CREATE INDEX idx_member_face   ON members(org_id) WHERE is_face_registered = FALSE AND is_active = TRUE;
+CREATE INDEX idx_mu_member     ON member_units(member_id);
+CREATE INDEX idx_mu_unit       ON member_units(unit_id);
+CREATE INDEX idx_mr_member     ON member_roles(member_id);
+CREATE INDEX idx_mr_role       ON member_roles(role_id);
+CREATE INDEX idx_acc_org       ON accounts(org_id);
+CREATE INDEX idx_acc_member    ON accounts(member_id) WHERE member_id IS NOT NULL;
+
+-- [C] Nhận diện
+CREATE INDEX idx_fm_org        ON face_models(org_id);
+CREATE INDEX idx_fm_active     ON face_models(org_id, is_active) WHERE is_active = TRUE;
+CREATE INDEX idx_fd_member     ON face_data(member_id, model_id, is_active) WHERE is_active = TRUE;
+CREATE INDEX idx_fd_org        ON face_data(org_id);
+CREATE INDEX idx_dev_org       ON devices(org_id);
+CREATE INDEX idx_dev_unit      ON devices(unit_id) WHERE unit_id IS NOT NULL;
+
+-- [D] Chấm công
+CREATE INDEX idx_ms_member     ON member_schedules(member_id, effective_date);
+CREATE INDEX idx_att_org_date  ON attendance_logs(org_id, attendance_date);
+CREATE INDEX idx_att_mem_date  ON attendance_logs(member_id, attendance_date);
+CREATE INDEX idx_att_status    ON attendance_logs(status) WHERE status != 'Present';
+CREATE INDEX idx_abs_org       ON absence_requests(org_id);
+CREATE INDEX idx_abs_member    ON absence_requests(member_id);
+CREATE INDEX idx_abs_pending   ON absence_requests(org_id, status) WHERE status = 'Pending';
+CREATE INDEX idx_hol_org_date  ON holidays(org_id, holiday_date);
+
+-- [E] Hệ thống
+CREATE INDEX idx_aulog_org     ON audit_logs(org_id) WHERE org_id IS NOT NULL;
+CREATE INDEX idx_aulog_created ON audit_logs(created_at);
+CREATE INDEX idx_aulog_table   ON audit_logs(table_name, action);
+
+-- ================================================================
+-- PHẦN 5: TẠO FUNCTIONS & TRIGGERS
+-- ================================================================
+
+-- 5.1 Auto-update updated_at khi UPDATE bản ghi
+CREATE OR REPLACE FUNCTION fn_update_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_org_updated     BEFORE UPDATE ON organizations    FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_unit_updated    BEFORE UPDATE ON units            FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_role_updated    BEFORE UPDATE ON roles            FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_sched_updated   BEFORE UPDATE ON schedules        FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_member_updated  BEFORE UPDATE ON members          FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_acc_updated     BEFORE UPDATE ON accounts         FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_fm_updated      BEFORE UPDATE ON face_models      FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_fd_updated      BEFORE UPDATE ON face_data        FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_dev_updated     BEFORE UPDATE ON devices          FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_att_updated     BEFORE UPDATE ON attendance_logs   FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_abs_updated     BEFORE UPDATE ON absence_requests  FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+CREATE TRIGGER trg_setting_updated BEFORE UPDATE ON org_settings      FOR EACH ROW EXECUTE FUNCTION fn_update_timestamp();
+
+-- 5.2 Auto-update is_face_registered khi thay đổi face_data
+CREATE OR REPLACE FUNCTION fn_update_face_status()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        UPDATE members SET is_face_registered = TRUE WHERE member_id = NEW.member_id;
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        UPDATE members SET is_face_registered = EXISTS(
+            SELECT 1 FROM face_data
+            WHERE member_id = OLD.member_id AND is_active = TRUE AND face_id != OLD.face_id
+        ) WHERE member_id = OLD.member_id;
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' AND OLD.is_active IS DISTINCT FROM NEW.is_active THEN
+        UPDATE members SET is_face_registered = EXISTS(
+            SELECT 1 FROM face_data
+            WHERE member_id = NEW.member_id AND is_active = TRUE
+        ) WHERE member_id = NEW.member_id;
+        RETURN NEW;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_face_status
+AFTER INSERT OR UPDATE OF is_active OR DELETE ON face_data
+FOR EACH ROW EXECUTE FUNCTION fn_update_face_status();
+
+-- 5.3 Tự động tạo partition tháng tiếp theo cho attendance_logs
+-- Cách dùng: SELECT fn_create_attendance_partition();
+-- Nên chạy hàng tháng (pg_cron hoặc cron job)
+CREATE OR REPLACE FUNCTION fn_create_attendance_partition()
+RETURNS void AS $$
+DECLARE
+    next_month DATE;
+    part_name  TEXT;
+    p_start    DATE;
+    p_end      DATE;
+BEGIN
+    next_month := DATE_TRUNC('month', CURRENT_DATE + INTERVAL '1 month');
+    part_name  := 'att_' || TO_CHAR(next_month, 'YYYY_MM');
+    p_start    := next_month;
+    p_end      := next_month + INTERVAL '1 month';
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = part_name) THEN
+        EXECUTE format(
+            'CREATE TABLE %I PARTITION OF attendance_logs FOR VALUES FROM (%L) TO (%L)',
+            part_name, p_start, p_end
+        );
+        RAISE NOTICE 'Đã tạo partition: %', part_name;
+    ELSE
+        RAISE NOTICE 'Partition % đã tồn tại', part_name;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ================================================================
+-- PHẦN 6: TẠO VIEWS
+-- ================================================================
+
+-- 6.1 Chấm công hôm nay (filter theo org_id khi query)
+CREATE OR REPLACE VIEW v_today_attendance AS
+SELECT
+    m.org_id,
+    m.member_id,       m.code AS member_code,      m.full_name,
+    s.name AS schedule_name,   s.start_time,        s.end_time,
+    a.check_in,        a.check_out,                 a.status,
+    a.late_minutes,    a.early_minutes,             a.working_hours,
+    a.check_in_confidence,     a.check_out_confidence,
+    fm.name AS checkin_model,  d.name AS device_name
+FROM members m
+LEFT JOIN attendance_logs a  ON m.member_id = a.member_id AND a.attendance_date = CURRENT_DATE
+LEFT JOIN schedules s        ON COALESCE(a.schedule_id, m.default_schedule_id) = s.schedule_id
+LEFT JOIN face_models fm     ON a.check_in_model_id = fm.model_id
+LEFT JOIN devices d          ON a.device_id = d.device_id
+WHERE m.is_active = TRUE;
+
+-- 6.2 Tổng hợp chấm công theo tháng
+CREATE OR REPLACE VIEW v_monthly_summary AS
+SELECT
+    m.org_id,          m.member_id,
+    m.code AS member_code,                          m.full_name,
+    DATE_TRUNC('month', a.attendance_date)          AS month,
+    COUNT(*)                                        AS total_records,
+    COUNT(*) FILTER (WHERE a.status = 'Present')    AS present_days,
+    COUNT(*) FILTER (WHERE a.status = 'Late')       AS late_days,
+    COUNT(*) FILTER (WHERE a.status = 'EarlyLeave') AS early_leave_days,
+    COUNT(*) FILTER (WHERE a.status = 'Absent')     AS absent_days,
+    COUNT(*) FILTER (WHERE a.status = 'Leave')      AS leave_days,
+    SUM(COALESCE(a.late_minutes, 0))                AS total_late_minutes,
+    SUM(COALESCE(a.working_hours, 0))               AS total_working_hours,
+    SUM(COALESCE(a.overtime_hours, 0))               AS total_overtime_hours
+FROM members m
+INNER JOIN attendance_logs a ON m.member_id = a.member_id
+WHERE m.is_active = TRUE
+GROUP BY m.org_id, m.member_id, m.code, m.full_name, DATE_TRUNC('month', a.attendance_date);
+
+-- 6.3 Thành viên chưa đăng ký Face ID
+CREATE OR REPLACE VIEW v_members_no_face AS
+SELECT org_id, member_id, code, full_name, join_date
+FROM members
+WHERE is_active = TRUE AND is_face_registered = FALSE;
+
+-- 6.4 Đơn xin nghỉ đang chờ duyệt
+CREATE OR REPLACE VIEW v_pending_absences AS
+SELECT
+    ar.org_id,         ar.request_id,
+    m.code AS member_code,      m.full_name,
+    ar.absence_type,   ar.start_date,     ar.end_date,
+    ar.total_days,     ar.reason,         ar.created_at AS requested_at
+FROM absence_requests ar
+INNER JOIN members m ON ar.member_id = m.member_id
+WHERE ar.status = 'Pending'
+ORDER BY ar.created_at;
+
+-- 6.5 Thống kê model AI (encoding & members per model)
+CREATE OR REPLACE VIEW v_face_model_stats AS
+SELECT
+    fm.org_id,         fm.model_id,
+    fm.name AS model_name,      fm.model_type,
+    fm.embedding_dimensions,    fm.match_threshold,    fm.is_default,
+    COUNT(fd.face_id) FILTER (WHERE fd.is_active = TRUE)          AS active_encodings,
+    COUNT(DISTINCT fd.member_id) FILTER (WHERE fd.is_active = TRUE) AS registered_members
+FROM face_models fm
+LEFT JOIN face_data fd ON fm.model_id = fd.model_id
+WHERE fm.is_active = TRUE
+GROUP BY fm.org_id, fm.model_id, fm.name, fm.model_type,
+         fm.embedding_dimensions, fm.match_threshold, fm.is_default;
+
+-- ================================================================
+-- PHẦN 7: DỮ LIỆU MẪU — 2 TỔ CHỨC TRÊN CÙNG 1 CSDL
+-- ================================================================
+
+-- ── 7.1 Tổ chức ─────────────────────────────────────────────────
+
+-- Org 1: Công ty ABC
+INSERT INTO organizations (code, name, org_type, config) VALUES
+('COMPANY_ABC', 'Công ty ABC', 'company',
+ '{"member_label":"Nhân viên","unit_label":"Phòng ban","attendance_label":"Chấm công"}');
+
+-- Org 2: Trường THPT XYZ
+INSERT INTO organizations (code, name, org_type, config) VALUES
+('SCHOOL_XYZ', 'Trường THPT XYZ', 'school',
+ '{"member_label":"Học sinh","unit_label":"Lớp","attendance_label":"Điểm danh"}');
+
+-- ── 7.2 Đơn vị ──────────────────────────────────────────────────
+
+-- Công ty: 3 phòng ban (flat)
+INSERT INTO units (org_id, code, name, unit_type, level) VALUES
+(1, 'HR',    'Phòng Nhân sự',    'department', 0),
+(1, 'IT',    'Phòng Công nghệ',  'department', 0),
+(1, 'SALES', 'Phòng Kinh doanh', 'department', 0);
+
+-- Trường: 2 khối → 3 lớp (hierarchy)
+INSERT INTO units (org_id, code, name, unit_type, level) VALUES
+(2, 'K12', 'Khối 12', 'grade', 0),
+(2, 'K11', 'Khối 11', 'grade', 0);
+
+INSERT INTO units (org_id, code, name, unit_type, parent_id, level) VALUES
+(2, '12A1', 'Lớp 12A1', 'class', 4, 1),
+(2, '12A2', 'Lớp 12A2', 'class', 4, 1),
+(2, '11A1', 'Lớp 11A1', 'class', 5, 1);
+
+-- ── 7.3 Vai trò ─────────────────────────────────────────────────
+
+INSERT INTO roles (org_id, code, name, role_type, metadata) VALUES
+(1, 'MGR',     'Trưởng phòng',      'position', '{"base_salary":25000000}'),
+(1, 'SR',      'Nhân viên cao cấp', 'position', '{"base_salary":15000000}'),
+(1, 'JR',      'Nhân viên',         'position', '{"base_salary":10000000}'),
+(2, 'STUDENT', 'Học sinh',          'grade',    '{"grade_level":12}'),
+(2, 'MONITOR', 'Lớp trưởng',       'grade',    '{"grade_level":12,"is_monitor":true}');
+
+-- ── 7.4 Ca / Lịch ───────────────────────────────────────────────
+
+-- Công ty: ca cố định
+INSERT INTO schedules (org_id, code, name, schedule_type, start_time, end_time, break_minutes, is_overnight, rules) VALUES
+(1, 'MAIN',  'Ca hành chính', 'fixed_shift', '08:00','17:00', 60, FALSE, '{"days_of_week":[1,2,3,4,5]}'),
+(1, 'NIGHT', 'Ca đêm',        'fixed_shift', '22:00','06:00', 30, TRUE,  '{"days_of_week":[1,2,3,4,5]}');
+
+-- Trường: buổi học theo tiết
+INSERT INTO schedules (org_id, code, name, schedule_type, start_time, end_time, break_minutes, rules) VALUES
+(2, 'MORNING',   'Buổi sáng',  'class_period', '07:00','11:30', 20,
+ '{"periods":[{"start":"07:00","end":"07:45"},{"start":"07:50","end":"08:35"},{"start":"08:55","end":"09:40"},{"start":"09:45","end":"10:30"},{"start":"10:35","end":"11:20"}]}'),
+(2, 'AFTERNOON', 'Buổi chiều', 'class_period', '13:00','17:00', 15,
+ '{"periods":[{"start":"13:00","end":"13:45"},{"start":"13:50","end":"14:35"},{"start":"14:55","end":"15:40"},{"start":"15:45","end":"16:30"}]}');
+
+-- ── 7.5 Model nhận diện ─────────────────────────────────────────
+
+-- Công ty dùng dlib (128D, euclidean)
+INSERT INTO face_models (org_id, code, name, model_type, embedding_dimensions, distance_metric, match_threshold, model_version, is_default, config) VALUES
+(1, 'DLIB_V1', 'dlib ResNet v1', 'dlib_resnet', 128, 'euclidean', 0.6, 'v1.0', TRUE,
+ '{"model_file":"dlib_face_recognition_resnet_model_v1.dat","predictor":"shape_predictor_68_face_landmarks.dat"}');
+
+-- Trường dùng ArcFace (512D, cosine)
+INSERT INTO face_models (org_id, code, name, model_type, embedding_dimensions, distance_metric, match_threshold, model_version, is_default, config) VALUES
+(2, 'ARCFACE_V1', 'ArcFace R100', 'arcface', 512, 'cosine', 0.4, 'r100', TRUE,
+ '{"input_size":[112,112],"backend":"onnx","preprocessing":"retinaface"}');
+
+-- ── 7.6 Thành viên ──────────────────────────────────────────────
+
+-- Công ty
+INSERT INTO members (org_id, code, full_name, gender, phone, email, default_schedule_id, metadata) VALUES
+(1, 'NV001', 'Nguyễn Văn An',  'M', '0901234567', 'an@abc.com',   1, '{"badge":"B-001"}'),
+(1, 'NV002', 'Trần Thị Bình',  'F', '0901234568', 'binh@abc.com', 1, '{"badge":"B-002"}'),
+(1, 'NV003', 'Lê Văn Cường',   'M', '0901234569', 'cuong@abc.com',1, '{"badge":"B-003"}');
+
+-- Trường
+INSERT INTO members (org_id, code, full_name, gender, date_of_birth, default_schedule_id, metadata) VALUES
+(2, 'HS001', 'Phạm Minh Đức',  'M', '2008-05-15', 3, '{"student_id":"HS202601","parent_phone":"0912345678"}'),
+(2, 'HS002', 'Hoàng Thị Em',   'F', '2008-08-20', 3, '{"student_id":"HS202602","parent_phone":"0912345679"}'),
+(2, 'HS003', 'Ngô Văn Phúc',   'M', '2009-01-10', 3, '{"student_id":"HS202603","parent_phone":"0912345680"}');
+
+-- ── 7.7 Phân bổ đơn vị & vai trò ───────────────────────────────
+
+INSERT INTO member_units (member_id, unit_id) VALUES
+(1, 1), (2, 2), (3, 2),     -- Công ty: An→HR, Bình→IT, Cường→IT
+(4, 6), (5, 6), (6, 8);     -- Trường: Đức→12A1, Em→12A1, Phúc→11A1
+
+INSERT INTO member_roles (member_id, role_id) VALUES
+(1, 1), (2, 2), (3, 3),     -- Công ty: An=MGR, Bình=SR, Cường=JR
+(4, 4), (5, 5), (6, 4);     -- Trường: Đức=HS, Em=Lớp trưởng, Phúc=HS
+
+-- ── 7.8 Thiết bị ────────────────────────────────────────────────
+
+INSERT INTO devices (org_id, code, name, device_type, location, model_id) VALUES
+(1, 'CAM-LOBBY', 'Camera Sảnh chính',  'camera', 'Tầng 1 - Sảnh vào', 1),
+(2, 'CAM-GATE',  'Camera Cổng trường', 'camera', 'Cổng chính',        2);
+
+-- ── 7.9 Tài khoản admin ─────────────────────────────────────────
+
+INSERT INTO accounts (org_id, username, password_hash, account_role) VALUES
+(1, 'admin_abc', '$2a$10$THAY_HASH_THUC_TE_O_DAY', 'Admin'),
+(2, 'admin_xyz', '$2a$10$THAY_HASH_THUC_TE_O_DAY', 'Admin');
+
+-- ── 7.10 Cài đặt per-org ────────────────────────────────────────
+
+-- Công ty
+INSERT INTO org_settings (org_id, setting_key, setting_value, data_type, description) VALUES
+(1, 'face_threshold',   '0.6',   'Decimal', 'Ngưỡng nhận diện khuôn mặt'),
+(1, 'max_face_images',  '5',     'Int',     'Số ảnh Face ID tối đa'),
+(1, 'late_threshold',   '15',    'Int',     'Ngưỡng đi muộn (phút)'),
+(1, 'require_checkout', 'true',  'Boolean', 'Bắt buộc checkout'),
+(1, 'auto_checkout',    '23:59', 'String',  'Giờ tự động checkout');
+
+-- Trường
+INSERT INTO org_settings (org_id, setting_key, setting_value, data_type, description) VALUES
+(2, 'face_threshold',   '0.4',   'Decimal', 'Ngưỡng nhận diện (ArcFace thấp hơn dlib)'),
+(2, 'max_face_images',  '3',     'Int',     'Số ảnh tối đa'),
+(2, 'late_threshold',   '5',     'Int',     'Ngưỡng trễ (phút)'),
+(2, 'require_checkout', 'false', 'Boolean', 'HS không bắt buộc checkout');
+
+-- ── 7.11 Ngày lễ / nghỉ ─────────────────────────────────────────
+
+INSERT INTO holidays (org_id, holiday_date, name, is_recurring, recurring_month, recurring_day) VALUES
+(1, '2026-01-01', 'Tết Dương lịch',      TRUE,  1,  1),
+(1, '2026-04-30', 'Giải phóng miền Nam', TRUE,  4, 30),
+(1, '2026-05-01', 'Quốc tế Lao động',    TRUE,  5,  1),
+(1, '2026-09-02', 'Quốc khánh',           TRUE,  9,  2),
+(2, '2026-01-01', 'Tết Dương lịch',      TRUE,  1,  1),
+(2, '2026-05-31', 'Bắt đầu nghỉ hè',    FALSE, NULL, NULL);
+
+-- ================================================================
+-- PHẦN 8: GHI CHÚ VẬN HÀNH
+-- ================================================================
+-- 1. TẠO PARTITION HÀNG THÁNG:
+--    SELECT fn_create_attendance_partition();
+--    Hoặc dùng pg_cron:
+--    SELECT cron.schedule('monthly_partition', '0 0 25 * *',
+--           'SELECT fn_create_attendance_partition()');
+--
+-- 2. ARCHIVAL (gỡ partition cũ):
+--    ALTER TABLE attendance_logs DETACH PARTITION att_2025_01;
+--
+-- 3. ĐỔI MODEL AI CHO 1 TỔ CHỨC:
+--    a. INSERT model mới vào face_models, SET is_default = TRUE
+--    b. UPDATE model cũ SET is_default = FALSE
+--    c. Hệ thống sẽ yêu cầu member đăng ký lại khuôn mặt
+--
+-- 4. KIỂM TRA MODEL STATS:
+--    SELECT * FROM v_face_model_stats WHERE org_id = 1;
+--
+-- 5. QUERY MẪU — lấy chấm công của 1 org:
+--    SELECT * FROM v_today_attendance WHERE org_id = 1;
+--    SELECT * FROM v_monthly_summary  WHERE org_id = 2 AND month = '2026-03-01';
+-- ================================================================
+-- KẾT THÚC SCRIPT
+-- ================================================================
