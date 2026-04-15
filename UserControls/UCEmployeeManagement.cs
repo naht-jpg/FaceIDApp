@@ -1,165 +1,276 @@
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using FaceIDApp.CustomControls;
+using FaceIDApp.Theme;
 
 namespace FaceIDApp.UserControls
 {
     public partial class UCEmployeeManagement : UserControl
     {
+        private ModernDataGridView dgvEmployees;
+        private ModernTextBox txtSearch;
+        private ModernComboBox cboFilter;
+        private RoundedButton btnAdd, btnEdit, btnDelete, btnFaceReg;
+        private Panel pnlToolbar;
+        private Label lblTotal;
+
         public UCEmployeeManagement()
         {
-            InitializeComponent();
-            SetupUI();
+            InitializeUI();
             LoadSampleData();
         }
 
-        private void SetupUI()
+        private void InitializeUI()
         {
-            // Style DataGridView
-            dgvEmployees.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(41, 128, 185);
-            dgvEmployees.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
-            dgvEmployees.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
-            dgvEmployees.ColumnHeadersHeight = 35;
-            dgvEmployees.DefaultCellStyle.Font = new Font("Segoe UI", 9F);
-            dgvEmployees.DefaultCellStyle.SelectionBackColor = Color.FromArgb(52, 152, 219);
-            dgvEmployees.RowTemplate.Height = 30;
-            dgvEmployees.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(245, 248, 250);
+            SuspendLayout();
+            BackColor = DesignSystem.Background;
+            Padding = new Padding(DesignSystem.PaddingOuter);
+            AutoScroll = true;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
 
-            // Set default filter
-            cboFilterDepartment.SelectedIndex = 0;
+            // ─── Title ─────────────────────────────────────────────
+            var pnlTitle = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = DesignSystem.Scale(44)
+            };
+            pnlTitle.Paint += (s, e) =>
+            {
+                DesignSystem.ApplyHighQualityRendering(e.Graphics);
+                DesignSystem.DrawSectionTitle(e.Graphics, "Quản Lý Thành Viên", 0, 0, 40);
+            };
 
-            // Event handlers
-            btnAdd.Click += BtnAdd_Click;
-            btnEdit.Click += BtnEdit_Click;
-            btnDelete.Click += BtnDelete_Click;
-            btnRefresh.Click += BtnRefresh_Click;
-            btnSearch.Click += BtnSearch_Click;
-            btnSave.Click += BtnSave_Click;
-            btnCancel.Click += BtnCancel_Click;
-            btnRegisterFace.Click += BtnRegisterFace_Click;
-            dgvEmployees.SelectionChanged += DgvEmployees_SelectionChanged;
+            // ─── Toolbar Card ──────────────────────────────────────
+            int tbH = DesignSystem.Scale(72);
+            pnlToolbar = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = tbH
+            };
+            pnlToolbar.Paint += (s, e) =>
+            {
+                var rect = new Rectangle(0, 0, pnlToolbar.Width - 1, pnlToolbar.Height - 1);
+                DesignSystem.DrawElevatedSurface(e.Graphics, rect, DesignSystem.BorderRadiusLg);
+            };
+
+            // All controls positioned manually inside the toolbar for perfect alignment
+            int midY = tbH / 2;
+            int ctrlH = DesignSystem.InputHeight;
+            int y = midY - ctrlH / 2;
+            int x = DesignSystem.Scale(16);
+
+            // Search
+            txtSearch = new ModernTextBox
+            {
+                PlaceholderText = "Tìm kiếm...",
+                Icon = "🔍",
+                ShowClearButton = true,
+                Size = new Size(DesignSystem.Scale(230), ctrlH),
+                Location = new Point(x, y),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left
+            };
+            x += txtSearch.Width + DesignSystem.Scale(10);
+
+            // Filter
+            cboFilter = new ModernComboBox
+            {
+                Size = new Size(DesignSystem.Scale(150), ctrlH),
+                Location = new Point(x, y),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left
+            };
+            cboFilter.Items.AddRange(new[] { "Tất cả", "Phòng IT", "Phòng Kế toán", "Phòng Nhân sự" });
+            cboFilter.SelectedIndex = 0;
+
+            // Right-side buttons (anchored right)
+            int btnH = DesignSystem.ButtonHeight;
+            int btnY = midY - btnH / 2;
+
+            btnAdd = new RoundedButton
+            {
+                Text = "Thêm mới",
+                ButtonIcon = "＋",
+                Variant = ButtonVariant.Primary,
+                Size = new Size(DesignSystem.Scale(120), btnH),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+
+            btnFaceReg = new RoundedButton
+            {
+                Text = "Đăng ký FaceID",
+                ButtonIcon = "📷",
+                Variant = ButtonVariant.Outline,
+                Size = new Size(DesignSystem.Scale(150), btnH),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+
+            btnEdit = new RoundedButton
+            {
+                Text = "Sửa",
+                ButtonIcon = "✏",
+                Variant = ButtonVariant.Outline,
+                Size = new Size(DesignSystem.Scale(80), btnH),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+
+            btnDelete = new RoundedButton
+            {
+                Text = "Xóa",
+                ButtonIcon = "🗑",
+                Variant = ButtonVariant.Danger,
+                Size = new Size(DesignSystem.Scale(80), btnH),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+
+            lblTotal = new Label
+            {
+                Text = "Tổng: 0",
+                Font = DesignSystem.Small,
+                ForeColor = DesignSystem.TextMuted,
+                AutoSize = true,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+
+            // Position right-side buttons from right edge
+            int rightX = pnlToolbar.Width - DesignSystem.Scale(16);
+
+            // We'll use Resize event to reposition
+            pnlToolbar.Resize += (s, e) =>
+            {
+                int rx = pnlToolbar.Width - DesignSystem.Scale(16);
+
+                rx -= btnAdd.Width;
+                btnAdd.Location = new Point(rx, btnY);
+
+                rx -= btnFaceReg.Width + DesignSystem.Scale(8);
+                btnFaceReg.Location = new Point(rx, btnY);
+
+                rx -= btnEdit.Width + DesignSystem.Scale(8);
+                btnEdit.Location = new Point(rx, btnY);
+
+                rx -= btnDelete.Width + DesignSystem.Scale(8);
+                btnDelete.Location = new Point(rx, btnY);
+
+                rx -= DesignSystem.Scale(12);
+                lblTotal.Location = new Point(rx - lblTotal.Width, midY - lblTotal.Height / 2);
+            };
+
+            // Click handlers
+            btnAdd.Click += (s, e) => MessageBox.Show("Thêm mới nhân viên", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            btnEdit.Click += (s, e) =>
+            {
+                if (dgvEmployees.CurrentRow == null) { MessageBox.Show("Vui lòng chọn nhân viên", "Thông báo"); return; }
+                MessageBox.Show("Chỉnh sửa: " + dgvEmployees.CurrentRow.Cells["colName"].Value, "Thông báo");
+            };
+            btnDelete.Click += (s, e) =>
+            {
+                if (dgvEmployees.CurrentRow == null) { MessageBox.Show("Vui lòng chọn nhân viên", "Thông báo"); return; }
+                if (MessageBox.Show("Xác nhận xóa?", "Cảnh báo", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    dgvEmployees.Rows.Remove(dgvEmployees.CurrentRow);
+                    UpdateTotalCount();
+                }
+            };
+
+            pnlToolbar.Controls.AddRange(new Control[]
+            {
+                txtSearch, cboFilter, btnDelete, btnEdit, btnFaceReg, btnAdd, lblTotal
+            });
+
+            // Spacer
+            var pnlGap = new Panel { Dock = DockStyle.Top, Height = DesignSystem.Scale(12) };
+
+            // ─── Data Grid ─────────────────────────────────────────
+            dgvEmployees = new ModernDataGridView { Dock = DockStyle.Fill };
+            dgvEmployees.Columns.AddRange(new DataGridViewColumn[]
+            {
+                new DataGridViewTextBoxColumn { Name = "colCode", HeaderText = "Mã NV", Width = DesignSystem.Scale(80) },
+                new DataGridViewTextBoxColumn { Name = "colName", HeaderText = "Họ tên", Width = DesignSystem.Scale(180) },
+                new DataGridViewTextBoxColumn { Name = "colUnit", HeaderText = "Đơn vị", Width = DesignSystem.Scale(140) },
+                new DataGridViewTextBoxColumn { Name = "colEmail", HeaderText = "Email", Width = DesignSystem.Scale(200) },
+                new DataGridViewTextBoxColumn { Name = "colPhone", HeaderText = "Điện thoại", Width = DesignSystem.Scale(120) },
+                new DataGridViewTextBoxColumn { Name = "colFaceID", HeaderText = "FaceID", Width = DesignSystem.Scale(100) },
+                new DataGridViewTextBoxColumn { Name = "colStatus", HeaderText = "Trạng thái", Width = DesignSystem.Scale(100) }
+            });
+
+            Controls.Add(dgvEmployees);
+            Controls.Add(pnlGap);
+            Controls.Add(pnlToolbar);
+            Controls.Add(pnlTitle);
+
+            txtSearch.TextChanged += (s, e) => FilterGrid();
+            cboFilter.SelectedIndexChanged += (s, e) => FilterGrid();
+
+            // Trigger initial layout
+            pnlToolbar.PerformLayout();
+            ResumeLayout(false);
+        }
+
+        private void FilterGrid()
+        {
+            string keyword = txtSearch.Text.Trim().ToLower();
+            string filter = cboFilter.SelectedItem?.ToString() ?? "Tất cả";
+
+            foreach (DataGridViewRow row in dgvEmployees.Rows)
+            {
+                if (row.IsNewRow) continue;
+                bool matchKeyword = string.IsNullOrEmpty(keyword);
+                bool matchFilter = filter == "Tất cả";
+
+                if (!matchKeyword)
+                {
+                    foreach (DataGridViewCell cell in row.Cells)
+                    {
+                        if (cell.Value != null && cell.Value.ToString().ToLower().Contains(keyword))
+                        { matchKeyword = true; break; }
+                    }
+                }
+
+                if (!matchFilter)
+                    matchFilter = row.Cells["colUnit"].Value?.ToString() == filter;
+
+                row.Visible = matchKeyword && matchFilter;
+            }
+            UpdateTotalCount();
+        }
+
+        private void UpdateTotalCount()
+        {
+            int visible = 0;
+            foreach (DataGridViewRow row in dgvEmployees.Rows)
+            {
+                if (!row.IsNewRow && row.Visible) visible++;
+            }
+            lblTotal.Text = $"Tổng: {visible} thành viên";
         }
 
         private void LoadSampleData()
         {
-            // Sample employee data
-            dgvEmployees.Rows.Add("1", "NV001", "Nguyễn Văn An", "Phòng IT", "Developer", "0901234567", "✅ Đã đăng ký", "Đang làm việc");
-            dgvEmployees.Rows.Add("2", "NV002", "Trần Thị Bình", "Phòng Kế toán", "Kế toán viên", "0902345678", "✅ Đã đăng ký", "Đang làm việc");
-            dgvEmployees.Rows.Add("3", "NV003", "Lê Văn Cường", "Phòng Nhân sự", "HR Manager", "0903456789", "❌ Chưa đăng ký", "Đang làm việc");
-            dgvEmployees.Rows.Add("4", "NV004", "Phạm Thị Dung", "Phòng Marketing", "Marketing Executive", "0904567890", "✅ Đã đăng ký", "Đang làm việc");
-            dgvEmployees.Rows.Add("5", "NV005", "Hoàng Văn Em", "Phòng IT", "Tester", "0905678901", "❌ Chưa đăng ký", "Nghỉ việc");
-        }
+            dgvEmployees.Rows.Add("NV001", "Nguyễn Văn An", "Phòng IT", "an.nv@company.com", "0901234567", "Đã đăng ký", "Hoạt động");
+            dgvEmployees.Rows.Add("NV002", "Trần Thị Bình", "Phòng Kế toán", "binh.tt@company.com", "0907654321", "Đã đăng ký", "Hoạt động");
+            dgvEmployees.Rows.Add("NV003", "Lê Văn Cường", "Phòng Nhân sự", "cuong.lv@company.com", "0912345678", "Chưa đăng ký", "Hoạt động");
+            dgvEmployees.Rows.Add("NV004", "Phạm Thị Dung", "Phòng IT", "dung.pt@company.com", "0987654321", "Đã đăng ký", "Tạm nghỉ");
+            dgvEmployees.Rows.Add("NV005", "Hoàng Minh Anh", "Phòng Kế toán", "anh.hm@company.com", "0934567890", "Đã đăng ký", "Hoạt động");
 
-        private void DgvEmployees_SelectionChanged(object sender, EventArgs e)
-        {
-            if (dgvEmployees.SelectedRows.Count > 0)
+            foreach (DataGridViewRow row in dgvEmployees.Rows)
             {
-                var row = dgvEmployees.SelectedRows[0];
-                txtEmployeeCode.Text = row.Cells["colCode"].Value?.ToString();
-                txtFullName.Text = row.Cells["colFullName"].Value?.ToString();
-                
-                string dept = row.Cells["colDepartment"].Value?.ToString();
-                int deptIndex = cboDepartment.FindString(dept);
-                if (deptIndex >= 0)
-                    cboDepartment.SelectedIndex = deptIndex;
-                
-                txtPosition.Text = row.Cells["colPosition"].Value?.ToString();
-                txtPhone.Text = row.Cells["colPhone"].Value?.ToString();
-            }
-        }
+                var faceIDCell = row.Cells["colFaceID"];
+                if (faceIDCell.Value?.ToString() == "Đã đăng ký")
+                    faceIDCell.Style.ForeColor = DesignSystem.SuccessDark;
+                else
+                    faceIDCell.Style.ForeColor = DesignSystem.Danger;
 
-        // Event handlers - placeholders for backend integration
-        private void BtnAdd_Click(object sender, EventArgs e)
-        {
-            ClearForm();
-            txtEmployeeCode.Focus();
-        }
-
-        private void BtnEdit_Click(object sender, EventArgs e)
-        {
-            if (dgvEmployees.SelectedRows.Count == 0)
-            {
-                MessageBox.Show("Vui lòng chọn nhân viên cần sửa!", "Thông báo", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-        }
-
-        private void BtnDelete_Click(object sender, EventArgs e)
-        {
-            if (dgvEmployees.SelectedRows.Count == 0)
-            {
-                MessageBox.Show("Vui lòng chọn nhân viên cần xóa!", "Thông báo", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                var statusCell = row.Cells["colStatus"];
+                if (statusCell.Value?.ToString() == "Hoạt động")
+                    statusCell.Style.ForeColor = DesignSystem.SuccessDark;
+                else
+                    statusCell.Style.ForeColor = DesignSystem.Warning;
             }
 
-            var result = MessageBox.Show("Bạn có chắc chắn muốn xóa nhân viên này?", "Xác nhận", 
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            
-            if (result == DialogResult.Yes)
-            {
-                MessageBox.Show("Chức năng xóa sẽ được tích hợp với backend.", "Thông báo", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-        }
-
-        private void BtnRefresh_Click(object sender, EventArgs e)
-        {
-            MessageBox.Show("Chức năng làm mới sẽ được tích hợp với backend.", "Thông báo", 
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        private void BtnSearch_Click(object sender, EventArgs e)
-        {
-            MessageBox.Show($"Tìm kiếm: {txtSearch.Text}\nChức năng sẽ được tích hợp với backend.", "Thông báo", 
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        private void BtnSave_Click(object sender, EventArgs e)
-        {
-            if (string.IsNullOrEmpty(txtEmployeeCode.Text) || string.IsNullOrEmpty(txtFullName.Text))
-            {
-                MessageBox.Show("Vui lòng nhập đầy đủ thông tin bắt buộc!", "Thông báo", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            MessageBox.Show("Chức năng lưu sẽ được tích hợp với backend.", "Thông báo", 
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        private void BtnCancel_Click(object sender, EventArgs e)
-        {
-            ClearForm();
-        }
-
-        private void BtnRegisterFace_Click(object sender, EventArgs e)
-        {
-            if (dgvEmployees.SelectedRows.Count == 0)
-            {
-                MessageBox.Show("Vui lòng chọn nhân viên cần đăng ký Face ID!", "Thông báo", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            // This will navigate to Face Registration UC
-            MessageBox.Show("Chuyển sang màn hình đăng ký Face ID...", "Thông báo", 
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        private void ClearForm()
-        {
-            txtEmployeeCode.Text = "";
-            txtFullName.Text = "";
-            cboDepartment.SelectedIndex = -1;
-            txtPosition.Text = "";
-            txtEmail.Text = "";
-            txtPhone.Text = "";
-            dtpDateOfBirth.Value = DateTime.Now.AddYears(-25);
-            dtpHireDate.Value = DateTime.Now;
-            chkIsActive.Checked = true;
-            picEmployeePhoto.Image = null;
+            dgvEmployees.ClearSelection();
+            dgvEmployees.CurrentCell = null;
+            UpdateTotalCount();
         }
     }
 }

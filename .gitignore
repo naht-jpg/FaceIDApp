@@ -1,0 +1,19 @@
+# Visual Studio cache/options directory
+.vs/
+
+# Build results
+[Bb]in/
+[Oo]bj/
+
+# Logs files
+*.log
+build_errors.txt
+project_overview.md.resolved
+
+# Packages/Dependencies
+/packages/
+
+# Project caches
+*.cache
+*.suo
+*.user
